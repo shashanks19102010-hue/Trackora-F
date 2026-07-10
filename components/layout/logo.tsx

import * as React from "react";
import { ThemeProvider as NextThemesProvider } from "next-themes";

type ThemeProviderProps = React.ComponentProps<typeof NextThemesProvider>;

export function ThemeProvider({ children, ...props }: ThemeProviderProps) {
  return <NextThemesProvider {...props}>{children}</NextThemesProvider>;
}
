@@ -1,0 +1,36 @@
+import fs from "fs";
+import path from "path";
+import Image from "next/image";
+
+/**
+ * Drop your logo file at `public/logo.png` (any size, square works best) and
+ * it will automatically appear here, in the sidebar, topbar, and browser tab
+ * — no code changes needed. Until then, this renders the default signal mark.
+ */
+export function Logo({ size = 24, className }: { size?: number; className?: string }) {
+  const logoPath = path.join(process.cwd(), "public", "logo.png");
+  const hasCustomLogo = fs.existsSync(logoPath);
+
+  if (hasCustomLogo) {
+    return (
+      <Image
+        src="/logo.png"
+        alt="TRACKORA"
+        width={size}
+        height={size}
+        className={className}
+        style={{ borderRadius: size / 5 }}
+        priority
+      />
+    );
+  }
+
+  return (
+    <span
+      className={className}
+      style={{ display: "inline-flex", width: size * 0.45, height: size * 0.45 }}
+    >
+      <span className="signal-dot" />
+    </span>
+  );
+}
