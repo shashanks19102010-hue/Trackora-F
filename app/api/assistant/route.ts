@@ -4,10 +4,10 @@ import { withRetry } from "@/lib/utils";
 import { logger } from "@/lib/logger";
 
 const SYSTEM_PROMPT = `You are ORI, the in-app assistant for TRACKORA, a consent-based location-sharing app.
-Help users navigate the app (Map, Circle/invites, Devices, Notifications, Analytics, Settings) and troubleshoot
-common issues: location permission problems, invites not arriving, 2FA setup, battery drain, and privacy controls.
-Never claim you can locate a person who hasn't accepted an invite, and never provide guidance on tracking someone
-without their consent. Keep answers short, practical, and specific to TRACKORA's features.`;
+Help users navigate the app (Map, People, Devices, Notifications, Analytics, Settings, Avatar) and troubleshoot
+common issues: location permission problems, invite links not working, 2FA setup, battery drain, and privacy
+controls. Never claim you can locate a person who hasn't accepted an invite, and never provide guidance on
+tracking someone without their consent. Keep answers short, practical, and specific to TRACKORA's features.`;
 
 export async function POST(request: NextRequest) {
   const supabase = createClient();
@@ -21,34 +21,40 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "No messages provided" }, { status: 400 });
   }
 
-  if (!process.env.ANTHROPIC_API_KEY) {
+  if (!process.env.GROQ_API_KEY) {
     return NextResponse.json(
-      { reply: "ORI isn't configured yet — add ANTHROPIC_API_KEY to your environment variables to enable live answers." },
+      { reply: "ORI isn't configured yet — add GROQ_API_KEY to your environment variables to enable live answers." },
       { status: 200 }
     );
   }
 
   try {
     const data = await withRetry(async () => {
-      const res = await fetch("https://api.anthropic.com/v1/messages", {
+      const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "x-api-key": process.env.ANTHROPIC_API_KEY!,
-          "anthropic-version": "2023-06-01",
+          Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
         },
         body: JSON.stringify({
-          model: "claude-sonnet-4-6",
+          model: "llama-3.3-70b-versatile",
           max_tokens: 500,
-          system: SYSTEM_PROMPT,
-          messages: messages.slice(-10), // cap context sent per request
+          messages: [
+            { role: "system", content: SYSTEM_PROMPT },
+            // Groq uses OpenAI-style { role, content } messages, capped to
+            // the last 10 turns to keep each request small and fast.
+            ...messages.slice(-10).map((m: { role: string; content: string }) => ({
+              role: m.role === "assistant" ? "assistant" : "user",
+              content: m.content,
+            })),
+          ],
         }),
       });
       if (!res.ok) throw new Error(`Assistant upstream error: ${res.status}`);
       return res.json();
     });
 
-    const reply = data.content?.find((b: { type: string }) => b.type === "text")?.text ?? "Sorry, I couldn't generate a reply.";
+    const reply = data.choices?.[0]?.message?.content ?? "Sorry, I couldn't generate a reply.";
     return NextResponse.json({ reply });
   } catch (error) {
     logger.error("assistant_call_failed", { message: (error as Error).message });
