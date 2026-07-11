@@ -1,12 +1,12 @@
 "use client";
 
 import * as React from "react";
-import { GoogleMap, useJsApiLoader, OverlayView, DirectionsRenderer } from "@react-google-maps/api";
-import { formatDistanceToNow } from "date-fns";
+import "leaflet/dist/leaflet.css";
+import L from "leaflet";
+import { MapContainer, TileLayer, Marker, Polyline, useMap } from "react-leaflet";
 import { Navigation, X } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
-import { formatCoordinate } from "@/lib/utils";
-import { Button } from "@/components/ui/button";
+import { withRetry } from "@/lib/utils";
 
 interface PersonLocation {
   owner_id: string;
@@ -23,20 +23,43 @@ interface Person {
   location: PersonLocation | null;
 }
 
-const MAP_CONTAINER_STYLE = { width: "100%", height: "100%" };
-const DEFAULT_CENTER = { lat: 20.5937, lng: 78.9629 }; // India-centered default
-const MAP_LIBRARIES: "places"[] = ["places"];
+const DEFAULT_CENTER: [number, number] = [20.5937, 78.9629]; // India-centered default
 
-// Nothing-OS-inspired dark map theme — desaturated, high-contrast labels.
-const DARK_MAP_STYLE = [
-  { elementType: "geometry", stylers: [{ color: "#0e1013" }] },
-  { elementType: "labels.text.stroke", stylers: [{ color: "#0e1013" }] },
-  { elementType: "labels.text.fill", stylers: [{ color: "#8b92a3" }] },
-  { featureType: "road", elementType: "geometry", stylers: [{ color: "#1c1f24" }] },
-  { featureType: "water", elementType: "geometry", stylers: [{ color: "#0a0c10" }] },
-  { featureType: "poi", stylers: [{ visibility: "off" }] },
-  { featureType: "transit", stylers: [{ visibility: "off" }] },
-];
+// CartoDB's free "dark matter" tiles — no API key needed, matches the
+// Nothing-OS-inspired dark theme used elsewhere in the app.
+const TILE_URL = "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png";
+const TILE_ATTRIBUTION =
+  '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>';
+
+// Public OSRM demo server — free, no key, fine for personal/demo traffic.
+// For heavy production use, swap this for a self-hosted OSRM instance or a
+// paid routing provider; see README.
+const OSRM_BASE_URL = "https://router.project-osrm.org/route/v1/driving";
+
+function signalDivIcon(color: string) {
+  return L.divIcon({
+    className: "",
+    html: `
+      <div style="position:relative;width:16px;height:16px;">
+        <span style="position:absolute;inset:0;border-radius:9999px;background:${color};opacity:0.55;animation:signalPulse 2.4s cubic-bezier(.2,.6,.4,1) infinite;"></span>
+        <span style="position:absolute;inset:3px;border-radius:9999px;background:${color};box-shadow:0 0 0 2px rgba(255,255,255,0.85);"></span>
+      </div>
+      <style>
+        @keyframes signalPulse { 0% { transform: scale(0.9); opacity:.7 } 70% { transform: scale(2.4); opacity:0 } 100% { opacity:0 } }
+      </style>
+    `,
+    iconSize: [16, 16],
+    iconAnchor: [8, 8],
+  });
+}
+
+function RecenterOnTarget({ position }: { position: [number, number] | null }) {
+  const map = useMap();
+  React.useEffect(() => {
+    if (position) map.flyTo(position, 13, { duration: 0.6 });
+  }, [position, map]);
+  return null;
+}
 
 export function LiveMap({
   people,
@@ -48,16 +71,10 @@ export function LiveMap({
   targetUserId?: string;
 }) {
   const [livePeople, setLivePeople] = React.useState(people);
-  const [selfPosition, setSelfPosition] = React.useState<{ lat: number; lng: number } | null>(null);
-  const [directions, setDirections] = React.useState<google.maps.DirectionsResult | null>(null);
-  const [routeInfo, setRouteInfo] = React.useState<{ distance: string; duration: string } | null>(null);
+  const [selfPosition, setSelfPosition] = React.useState<[number, number] | null>(null);
+  const [route, setRoute] = React.useState<[number, number][] | null>(null);
+  const [routeInfo, setRouteInfo] = React.useState<{ distanceKm: string; durationMin: string } | null>(null);
   const [activeTarget, setActiveTarget] = React.useState<string | undefined>(targetUserId);
-
-  const { isLoaded } = useJsApiLoader({
-    googleMapsApiKey: process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY ?? "",
-    id: "trackora-map",
-    libraries: MAP_LIBRARIES,
-  });
 
   // Subscribe to new pings in real time so markers move the instant someone's
   // location updates — no polling, no page refresh.
@@ -70,24 +87,21 @@ export function LiveMap({
         { event: "INSERT", schema: "public", table: "location_pings" },
         (payload) => {
           const row = payload.new as PersonLocation;
-          setLivePeople((prev) =>
-            prev.map((p) => (p.id === row.owner_id ? { ...p, location: row } : p))
-          );
+          setLivePeople((prev) => prev.map((p) => (p.id === row.owner_id ? { ...p, location: row } : p)));
         }
       )
       .subscribe();
-
     return () => {
       supabase.removeChannel(channel);
     };
   }, [selfUserId]);
 
   // Track our own live position client-side so directions always start from
-  // "right here" — this never gets written anywhere else on this screen.
+  // "right here" — this is never written anywhere from this screen.
   React.useEffect(() => {
     if (!("geolocation" in navigator)) return;
     const watchId = navigator.geolocation.watchPosition(
-      (pos) => setSelfPosition({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
+      (pos) => setSelfPosition([pos.coords.latitude, pos.coords.longitude]),
       () => {},
       { enableHighAccuracy: true, maximumAge: 5000 }
     );
@@ -97,97 +111,89 @@ export function LiveMap({
   const withLocation = livePeople.filter((p) => p.location);
   const target = activeTarget ? withLocation.find((p) => p.id === activeTarget) : undefined;
 
-  // Compute directions whenever we have both an origin and a chosen target.
+  // Fetch a free driving route from OSRM whenever we have both an origin and
+  // a chosen target — retried once on transient network failures.
   React.useEffect(() => {
-    if (!isLoaded || !selfPosition || !target?.location) {
-      setDirections(null);
+    if (!selfPosition || !target?.location) {
+      setRoute(null);
       setRouteInfo(null);
       return;
     }
-    const directionsService = new google.maps.DirectionsService();
-    directionsService.route(
-      {
-        origin: selfPosition,
-        destination: { lat: target.location.lat, lng: target.location.lng },
-        travelMode: google.maps.TravelMode.DRIVING,
-      },
-      (result, status) => {
-        if (status === "OK" && result) {
-          setDirections(result);
-          const leg = result.routes[0]?.legs[0];
-          if (leg) setRouteInfo({ distance: leg.distance?.text ?? "", duration: leg.duration?.text ?? "" });
-        } else {
-          setDirections(null);
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const url = `${OSRM_BASE_URL}/${selfPosition[1]},${selfPosition[0]};${target.location!.lng},${target.location!.lat}?overview=full&geometries=geojson`;
+        const data = await withRetry(
+          async () => {
+            const res = await fetch(url);
+            if (!res.ok) throw new Error(`Routing failed: ${res.status}`);
+            return res.json();
+          },
+          { retries: 1 }
+        );
+
+        if (cancelled) return;
+        const leg = data.routes?.[0];
+        if (leg) {
+          const coords: [number, number][] = leg.geometry.coordinates.map(([lng, lat]: [number, number]) => [lat, lng]);
+          setRoute(coords);
+          setRouteInfo({
+            distanceKm: (leg.distance / 1000).toFixed(1),
+            durationMin: Math.round(leg.duration / 60).toString(),
+          });
+        }
+      } catch {
+        if (!cancelled) {
+          setRoute(null);
           setRouteInfo(null);
         }
       }
-    );
-  }, [isLoaded, selfPosition, target?.location?.lat, target?.location?.lng]);
+    })();
 
-  const center = target?.location
-    ? { lat: target.location.lat, lng: target.location.lng }
+    return () => {
+      cancelled = true;
+    };
+  }, [selfPosition, target?.location?.lat, target?.location?.lng]);
+
+  const center: [number, number] = target?.location
+    ? [target.location.lat, target.location.lng]
     : withLocation[0]?.location
-    ? { lat: withLocation[0].location!.lat, lng: withLocation[0].location!.lng }
+    ? [withLocation[0].location!.lat, withLocation[0].location!.lng]
     : DEFAULT_CENTER;
-
-  if (!process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY) {
-    return (
-      <div className="flex h-full items-center justify-center bg-secondary/40 p-8 text-center text-sm text-muted-foreground">
-        Add NEXT_PUBLIC_GOOGLE_MAPS_API_KEY to your environment variables to enable the live map.
-      </div>
-    );
-  }
-
-  if (!isLoaded) {
-    return <div className="flex h-full animate-pulse items-center justify-center bg-secondary/40 text-sm text-muted-foreground">Loading map…</div>;
-  }
 
   return (
     <div className="relative h-full w-full">
-      <GoogleMap
-        mapContainerStyle={MAP_CONTAINER_STYLE}
+      <MapContainer
         center={center}
-        zoom={target ? 13 : withLocation.length ? 11 : 4}
-        options={{
-          styles: DARK_MAP_STYLE,
-          disableDefaultUI: true,
-          zoomControl: true,
-          clickableIcons: false,
-        }}
+        zoom={withLocation.length ? 11 : 4}
+        style={{ width: "100%", height: "100%", background: "#0e1013" }}
+        zoomControl={true}
+        attributionControl={true}
       >
+        <TileLayer url={TILE_URL} attribution={TILE_ATTRIBUTION} />
+        <RecenterOnTarget position={target?.location ? [target.location.lat, target.location.lng] : null} />
+
         {withLocation.map((person) => (
-          <OverlayView
+          <Marker
             key={person.id}
-            position={{ lat: person.location!.lat, lng: person.location!.lng }}
-            mapPaneName={OverlayView.OVERLAY_MOUSE_TARGET}
-          >
-            <SignalPin
-              person={person}
-              onNavigate={() => setActiveTarget(person.id)}
-              isActiveTarget={activeTarget === person.id}
-            />
-          </OverlayView>
+            position={[person.location!.lat, person.location!.lng]}
+            icon={signalDivIcon(activeTarget === person.id ? "#3ED9A0" : "#FF5533")}
+            eventHandlers={{ click: () => setActiveTarget(person.id) }}
+          />
         ))}
 
-        {directions && (
-          <DirectionsRenderer
-            directions={directions}
-            options={{
-              suppressMarkers: true,
-              polylineOptions: { strokeColor: "#FF5533", strokeWeight: 4, strokeOpacity: 0.85 },
-            }}
-          />
-        )}
-      </GoogleMap>
+        {route && <Polyline positions={route} pathOptions={{ color: "#FF5533", weight: 4, opacity: 0.85 }} />}
+      </MapContainer>
 
       {target && routeInfo && (
         <div className="glass-panel absolute left-4 top-4 flex items-center gap-3 rounded-xl px-4 py-3">
           <Navigation className="h-4 w-4 text-signal" />
           <div className="text-sm">
             <p className="font-medium">
-              To {target.name}: {routeInfo.distance} · {routeInfo.duration}
+              To {target.name}: {routeInfo.distanceKm} km · ~{routeInfo.durationMin} min
             </p>
-            <p className="mono-readout">Driving directions, live-updated</p>
+            <p className="mono-readout">Driving route via OSRM (open-source, free)</p>
           </div>
           <button
             onClick={() => setActiveTarget(undefined)}
@@ -198,44 +204,18 @@ export function LiveMap({
           </button>
         </div>
       )}
+
+      <div className="glass-panel absolute right-4 top-4 rounded-xl px-3 py-2 text-xs text-muted-foreground">
+        Tap a pin to select someone, or use Directions from People.
+      </div>
+
+      {withLocation.length === 0 && (
+        <div className="pointer-events-none absolute inset-x-0 bottom-4 flex justify-center">
+          <p className="glass-panel rounded-full px-4 py-2 text-xs text-muted-foreground">
+            Nobody's sharing their location with you yet — invite someone from People.
+          </p>
+        </div>
+      )}
     </div>
   );
 }
-
-function SignalPin({
-  person,
-  onNavigate,
-  isActiveTarget,
-}: {
-  person: Person;
-  onNavigate: () => void;
-  isActiveTarget: boolean;
-}) {
-  if (!person.location) return null;
-  return (
-    <div className="-translate-x-1/2 -translate-y-full flex flex-col items-center">
-      <div className="glass-panel mb-1 whitespace-nowrap rounded-lg px-2 py-1.5 text-xs font-medium text-fog shadow-lg">
-        <div className="flex items-center gap-2">
-          <span>{person.name}</span>
-          <button
-            onClick={onNavigate}
-            className={`rounded-full p-1 transition-colors ${isActiveTarget ? "bg-signal text-white" : "bg-white/10 hover:bg-white/20"}`}
-            aria-label={`Get directions to ${person.name}`}
-            title="Get directions"
-          >
-            <Navigation className="h-3 w-3" />
-          </button>
-        </div>
-        <div className="mono-readout mt-0.5">
-          {formatCoordinate(person.location.lat)}, {formatCoordinate(person.location.lng)} ·{" "}
-          {formatDistanceToNow(new Date(person.location.captured_at), { addSuffix: true })}
-        </div>
-      </div>
-      <div className="relative flex h-4 w-4 items-center justify-center">
-        <span className="absolute inline-flex h-full w-full animate-signal-pulse rounded-full bg-signal" />
-        <span className="relative inline-flex h-3 w-3 rounded-full bg-signal ring-2 ring-white/80" />
-      </div>
-    </div>
-  );
-}
-
