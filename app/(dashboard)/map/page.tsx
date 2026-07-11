@@ -1,5 +1,5 @@
 import { createClient } from "@/lib/supabase/server";
-import { LiveMap } from "@/components/map/live-map";
+import { LiveMapLoader } from "@/components/map/live-map-loader";
 import { LocationReporter } from "@/components/map/location-reporter";
 
 export default async function MapPage({ searchParams }: { searchParams: { to?: string } }) {
@@ -52,7 +52,7 @@ export default async function MapPage({ searchParams }: { searchParams: { to?: s
         <p className="text-sm text-muted-foreground">Live positions for everyone in your circle who's shared with you.</p>
       </div>
       <div className="relative flex-1 overflow-hidden rounded-2xl border border-border">
-        <LiveMap people={people} selfUserId={user.id} targetUserId={searchParams?.to} />
+        <LiveMapLoader people={people} selfUserId={user.id} targetUserId={searchParams?.to} />
       </div>
       <LocationReporter userId={user.id} />
     </div>
