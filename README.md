@@ -1,4 +1,4 @@
-# TRACKORA-F
+# TRACKORA
 
 A consent-based location-sharing app. Nobody appears on your map until they accept your invite, and access can be revoked — or paused instantly — at any time.
 
@@ -6,12 +6,14 @@ Built with Next.js 14 (App Router), TypeScript, Tailwind CSS, Framer Motion, and
 
 ## What's new in this version
 
+- **Free map, no billing required**: the live map now runs on **Leaflet + OpenStreetMap** (CartoDB dark tiles) instead of Google Maps — no API key, no credit card, no Google Cloud billing account needed.
+- **Free directions**: routing uses the public **OSRM** demo server (`router.project-osrm.org`) — also free, no key. Good for personal/demo use; see the note in "Directions" below if you outgrow it.
 - **Link-based invites**: no phone number needed upfront. Generate a link on the People page, copy it, send it through WhatsApp/SMS/email/whatever — the recipient signs in and accepts from that link.
-- **Directions**: click "Directions" next to anyone in your circle to draw a live driving route from your current position to their last known location, with distance and ETA (Google Directions API).
 - **Ghost mode**: a one-click toggle in the top bar that instantly hides your location from everyone, without revoking any connections.
 - **Avatar builder**: a Bitmoji/Snapchat-style avatar creator (skin tone, hair, eyes, mouth, accessories, background) rendered as SVG — no photo required.
 - **Custom logo support**: drop a `logo.png` into `/public` and it automatically appears in the sidebar, top bar, landing page, and browser tab.
 - **Brute-force protection**: failed login attempts are rate-limited per email (8 attempts / 15 minutes) via a service-role-only table.
+- **ORI assistant runs on Groq** (free tier) instead of a paid API — swap `GROQ_API_KEY` for your own key from console.groq.com.
 
 ## How tracking works here
 
@@ -25,8 +27,9 @@ Built with Next.js 14 (App Router), TypeScript, Tailwind CSS, Framer Motion, and
 
 - Node.js 18.18+ and npm
 - A [Supabase](https://supabase.com) project
-- A [Google Cloud](https://console.cloud.google.com) project with the **Maps JavaScript API** enabled and an API key restricted to your domain
-- (Optional) An [Anthropic API key](https://console.anthropic.com) to power the ORI assistant
+- (Optional) A free [Groq](https://console.groq.com) API key to power the ORI assistant
+
+The map and directions need no API key or billing account at all — they run on free, open infrastructure (OpenStreetMap tiles + OSRM routing).
 
 ## 2. Set up Supabase
 
@@ -49,10 +52,9 @@ Copy `.env.example` to `.env.local` and fill in:
 NEXT_PUBLIC_SUPABASE_URL=
 NEXT_PUBLIC_SUPABASE_ANON_KEY=
 SUPABASE_SERVICE_ROLE_KEY=
-NEXT_PUBLIC_GOOGLE_MAPS_API_KEY=
 NEXT_PUBLIC_APP_URL=
 NEXTAUTH_SECRET=
-ANTHROPIC_API_KEY=
+GROQ_API_KEY=
 NEXT_PUBLIC_2FA_ISSUER=TRACKORA
 ```
 
