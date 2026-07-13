@@ -1,7 +1,11 @@
+/**
+ * Updated Middleware with Centralized Constants
+ * Improved security and maintainability
+ */
+
 import { createServerClient, type CookieOptions } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
-
-const PUBLIC_PATHS = ["/login", "/signup", "/verify", "/forgot-password", "/reset-password", "/api/health", "/invite"];
+import { PUBLIC_PATHS, AUTH_PATHS } from "./lib/constants";
 
 export async function middleware(request: NextRequest) {
   let response = NextResponse.next({ request: { headers: request.headers } });
@@ -30,8 +34,11 @@ export async function middleware(request: NextRequest) {
     data: { user },
   } = await supabase.auth.getUser();
 
-  const isPublic = PUBLIC_PATHS.some((p) => request.nextUrl.pathname.startsWith(p));
+  const isPublic = PUBLIC_PATHS.some((p) =>
+    request.nextUrl.pathname.startsWith(p)
+  );
 
+  // Redirect unauthenticated users to login
   if (!user && !isPublic && request.nextUrl.pathname !== "/") {
     const redirectUrl = request.nextUrl.clone();
     redirectUrl.pathname = "/login";
@@ -39,7 +46,8 @@ export async function middleware(request: NextRequest) {
     return NextResponse.redirect(redirectUrl);
   }
 
-  if (user && ["/login", "/signup"].includes(request.nextUrl.pathname)) {
+  // Redirect authenticated users away from auth pages
+  if (user && AUTH_PATHS.includes(request.nextUrl.pathname)) {
     const redirectUrl = request.nextUrl.clone();
     redirectUrl.pathname = "/map";
     return NextResponse.redirect(redirectUrl);
@@ -49,5 +57,7 @@ export async function middleware(request: NextRequest) {
 }
 
 export const config = {
-  matcher: ["/((?!_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|webp)$).*)"],
+  matcher: [
+    "/((?!_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|webp)$).*)",
+  ],
 };
